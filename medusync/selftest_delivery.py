@@ -1,14 +1,29 @@
 # Copyright (c) 2026, Mithtech Innovative Solutions PVT LTD and contributors
-"""Live outbound delivery test against a local stub receiver.
-
-Proves the half selftest.run deliberately skips: that the wildcard hook
-actually fires on a real save, that the envelope is signed with the
-outbound secret, and that the log row lands on Success.
+"""Live outbound delivery test against a stub receiver.
 
     bench --site <site> execute medusync.selftest_delivery.run
+
+Proves the half `selftest.run` deliberately skips: that the wildcard hook
+fires on a real save, that the envelope reaching the store is signed with
+that store's outbound secret, that the field map was applied on the way
+out, and that a store which cannot be reached is recorded rather than
+swallowed.
+
+It needs nothing set up first. The receiver is `medusync.selftest_receiver`,
+started here on a port the OS picks and stopped again on the way out, and
+the store and mapping are created and removed by this script. Everything
+it changes is put back, including Medusync Settings.
 """
 
 import frappe
+
+from medusync import selftest_fixtures as fx
+from medusync.selftest_receiver import Receiver
+
+SITE_ID = "selftest-delivery"
+MAPPING = "Selftest Delivery ToDo"
+SECRET = "outbound-secret-xyz"
+INBOUND_PATH = "/webhooks/erpnext-inbound"
 
 results = []
 
@@ -19,23 +34,63 @@ def ok(label, cond, detail=None):
 
 def run():
 	frappe.set_user("Administrator")
+	snapshot = fx.snapshot_settings()
+	receiver = Receiver(SECRET)
+	try:
+		with receiver:
+			_setup(receiver)
+			todo = _create(receiver)
+			_update(todo)
+			_unreachable(todo)
+			frappe.delete_doc("ToDo", todo.name, ignore_permissions=True, force=True)
+		_enqueue_signature()
+	finally:
+		_teardown(snapshot)
 
-	s = frappe.get_single("Medusync Settings")
-	s.medusa_url = "http://127.0.0.1:8791"
-	s.inbound_path = "/webhooks/erpnext-inbound"
-	s.outbound_secret = "outbound-secret-xyz"
-	s.use_background_jobs = 0  # deliver inline so the test can assert
-	s.enabled = 1
-	s.save()
-	frappe.db.commit()
+	fx.report(results)
 
-	mapping = frappe.get_doc("Medusync Mapping", "Selftest ToDo")
-	mapping.enabled = 1
-	mapping.save()
-	frappe.db.commit()
-	frappe.clear_cache()
 
-	before = frappe.db.count("Medusync Log", {"direction": "Outbound"})
+def _setup(receiver):
+	"""A store pointed at the stub, and a mapping switched on properly.
+
+	The mapping is created disabled and enabled through the studio.
+	`Medusync Mapping.enabled` defaults to 1, so building it any other
+	way is refused by the rehearsal gate - which is what used to stop
+	this script on its third statement.
+	"""
+	fx.configure_settings(
+		medusa_url="https://medusa.example.com",
+		inbound_path=INBOUND_PATH,
+		use_background_jobs=0,  # deliver inline so the test can assert
+		max_attempts=1,
+		log_payloads=1,
+		enabled=1,
+	)
+	# Delivery reads the URL and the secret from the Medusync Site, never
+	# from the Single, so the stub has to be configured here.
+	fx.ensure_site(
+		SITE_ID,
+		medusa_url=receiver.url,
+		outbound_secret=SECRET,
+		inbound_path=INBOUND_PATH,
+	)
+	fx.make_mapping(MAPPING, site=SITE_ID)
+	result = fx.enable(MAPPING)
+	ok("the mapping rehearsed and switched on", result.get("passed") and result.get("enabled"), result.get("errors"))
+
+
+def _teardown(snapshot):
+	fx.drop(fx.MAPPING_DOCTYPE, MAPPING)
+	fx.drop(fx.SITE_DOCTYPE, SITE_ID)
+	fx.purge_logs(SITE_ID)
+	fx.restore_settings(snapshot)
+
+
+# -- a create ---------------------------------------------------------
+
+
+def _create(receiver):
+	before = fx.outbound_count()
 
 	todo = frappe.get_doc({
 		"doctype": "ToDo", "description": "delivery test", "status": "Open", "priority": "Medium",
@@ -43,15 +98,15 @@ def run():
 	todo.insert(ignore_permissions=True)
 	frappe.db.commit()
 
-	after = frappe.db.count("Medusync Log", {"direction": "Outbound"})
-	# Exactly ONE — Frappe runs on_update inside insert(), and a mapping
+	after = fx.outbound_count()
+	# Exactly ONE - Frappe runs on_update inside insert(), and a mapping
 	# listening to both triggers must not emit the same state twice.
 	ok("a create queues exactly one outbound event", after == before + 1, f"{before} -> {after}")
 
 	rows = frappe.get_all(
 		"Medusync Log",
 		filters={"direction": "Outbound", "document_name": todo.name},
-		fields=["name", "status", "status_code", "event", "event_id", "error", "attempt"],
+		fields=["name", "status", "status_code", "event", "event_id", "error", "attempt", "action"],
 		order_by="creation desc",
 		limit=1,
 	)
@@ -63,77 +118,93 @@ def run():
 		ok("event name is the derived one", row.event == "todo.created", row.event)
 		ok("event_id identifies the document", todo.name in (row.event_id or ""), row.event_id)
 		ok("no error recorded", not row.error, row.error)
+		ok("what the store said it did is stored on the row", row.action == "created", row.action)
 
 	# What the stub actually saw.
-	import json, os
-	path = "/tmp/medusync_stub_received.json"
-	seen = json.load(open(path)) if os.path.exists(path) else []
-	mine = [r for r in seen if (r.get("data") or {}).get("name") == todo.name]
-	ok("the stub received the event", bool(mine), seen[-1] if seen else None)
+	mine = receiver.for_document(todo.name)
+	ok("the stub received the event", bool(mine), len(receiver.records))
 	if mine:
 		r = mine[-1]
-		ok("HMAC verified on the receiving side", r["ok"] is True, r)
-		ok("posted to the configured inbound path", r["path"] == "/webhooks/erpnext-inbound", r["path"])
-		ok("field map applied on the wire", r["data"].get("title") == "delivery test", r["data"])
+		ok("HMAC verified on the receiving side", r["ok"] is True, r["signature"])
+		ok("posted to the configured inbound path", r["path"] == INBOUND_PATH, r["path"])
+		ok("sent as JSON", r["content_type"] == "application/json", r["content_type"])
+		# The payload is keyed by OUR fieldnames; Medusa applies the field
+		# map on receipt. An event that renamed `description` to `title`
+		# on the wire would be describing a system that does not exist.
+		ok("the field map keeps Frappe fieldnames on the wire",
+		   r["data"].get("description") == "delivery test", r["data"])
+		ok("the Medusa path is not what was sent", "title" not in r["data"], r["data"])
+		ok("To Medusa field is included", r["data"].get("status") == "Open", r["data"])
 		ok("From-Medusa-only field withheld", "priority" not in r["data"], r["data"])
 		ok("event id also sent as a header", r["event_id_header"] == r["event_id"], r)
+		ok("the envelope names this store", (r["origin"] or {}).get("site_id") == SITE_ID, r["origin"])
+		ok("a real event is not marked as a dry run", r["dry_run"] is False, r["dry_run"])
 
-	# An update must fire a SECOND, distinct event.
+	return todo
+
+
+# -- an update --------------------------------------------------------
+
+
+def _update(todo):
 	todo.reload()
 	todo.description = "delivery test edited"
 	todo.save(ignore_permissions=True)
 	frappe.db.commit()
-	rows2 = frappe.get_all(
+	rows = frappe.get_all(
 		"Medusync Log",
 		filters={"direction": "Outbound", "document_name": todo.name},
 		fields=["event", "event_id", "status"], order_by="creation desc", limit=2,
 	)
-	ok("an update fires its own event", len(rows2) == 2 and rows2[0].event == "todo.updated",
-	   [dict(r) for r in rows2])
-	ok("the two events have different ids", len({r.event_id for r in rows2}) == 2,
-	   [r.event_id for r in rows2])
-	ok("the update also delivered", rows2[0].status == "Success", dict(rows2[0]))
+	ok("an update fires its own event", len(rows) == 2 and rows[0].event == "todo.updated",
+	   [dict(r) for r in rows])
+	ok("the two events have different ids", len({r.event_id for r in rows}) == 2,
+	   [r.event_id for r in rows])
+	ok("the update also delivered", rows[0].status == "Success", dict(rows[0]))
 
-	# A failing endpoint must be recorded, not swallowed.
-	s.medusa_url = "http://127.0.0.1:9"  # closed port
-	s.max_attempts = 1
-	s.save()
-	frappe.db.commit()
-	frappe.clear_cache()
+
+# -- a store that is not answering ------------------------------------
+
+
+def _unreachable(todo):
+	"""A failing endpoint must be recorded, not swallowed.
+
+	The URL is changed on the Medusync Site, not on the Single: delivery
+	resolves the endpoint through `sites.endpoint(site)`, so re-pointing
+	the Single here would have left the next delivery going to the stub
+	and the assertion proving nothing.
+	"""
+	fx.point_site_at(SITE_ID, "http://127.0.0.1:9")  # closed port
 	todo.reload()
 	todo.description = "delivery test unreachable"
 	todo.save(ignore_permissions=True)
 	frappe.db.commit()
-	fail_row = frappe.get_all(
+	row = frappe.get_all(
 		"Medusync Log", filters={"direction": "Outbound", "document_name": todo.name},
-		fields=["status", "error"], order_by="creation desc", limit=1,
+		fields=["status", "error", "attempt"], order_by="creation desc", limit=1,
 	)[0]
-	ok("an unreachable Medusa is recorded as Failed", fail_row.status == "Failed", dict(fail_row))
-	ok("…with the reason attached", bool(fail_row.error), fail_row.error)
+	# `Poison`, not `Failed`: max_attempts is 1, so the first refusal is
+	# already terminal, and _retry_or_fail marks a row that has given up
+	# as Poison so the retry sweep leaves it alone. A test asserting
+	# `Failed` here is asserting the wrong end of that branch.
+	ok("an unreachable Medusa is recorded as terminal", row.status == "Poison", dict(row))
+	ok("...with the reason attached", bool(row.error), row.error)
+	ok("...on the attempt that gave up", row.attempt == 1, row.attempt)
 
-	frappe.delete_doc("ToDo", todo.name, ignore_permissions=True, force=True)
 
-	_enqueue_signature()
-
-	passed = sum(1 for _, c, _ in results if c)
-	failed = len(results) - passed
-	for label, cond, detail in results:
-		print(("  PASS  " if cond else "  FAIL  ") + label + (f"   <- {detail}" if detail and not cond else ""))
-	print(f"\n{passed} passed, {failed} failed")
-	if failed:
-		raise SystemExit(1)
+# -- the queued path --------------------------------------------------
 
 
 def _enqueue_signature():
 	"""The background path must actually be callable.
 
-	`frappe.enqueue` reserves several kwarg names for itself — `event`,
+	`frappe.enqueue` reserves several kwarg names for itself - `event`,
 	`queue`, `timeout`, `job_name`, `now`, `at_front`. A job argument
 	sharing one of those names is swallowed by enqueue and never reaches
 	the function, which then dies in the worker with "missing 1 required
 	positional argument". Inline delivery calls the function directly and
 	sees none of this, so every assertion above can pass while the queued
-	path is broken — that is exactly what happened on the first live run.
+	path is broken - that is exactly what happened on the first live run.
 
 	Rather than require a running worker, assert the contract: no
 	parameter of `deliver` may collide with an enqueue-reserved name.
@@ -151,12 +222,20 @@ def _enqueue_signature():
 	clashes = params & RESERVED
 	ok("no deliver() parameter collides with a frappe.enqueue kwarg", not clashes, sorted(clashes))
 
-	# And the call site must pass every non-defaulted parameter.
-	src = inspect.getsource(outbound.dispatch) + inspect.getsource(outbound._retry_or_fail)
+	# And every enqueue call site must pass every non-defaulted parameter.
+	# There are exactly two: `outbound.send`, which enqueues (or, inline,
+	# calls) `deliver` for a fresh event, and `tasks.retry_due`, the sweep
+	# that re-enqueues a parked row. `dispatch` is NOT one - it hands off
+	# to `send` - and `_retry_or_fail` parks the row rather than
+	# re-enqueuing, so a check that reads those two sees the arguments
+	# nowhere and fails on a delivery path that is in fact correct.
+	from medusync import tasks
+
+	src = inspect.getsource(outbound.send) + inspect.getsource(tasks.retry_due)
 	required = {
 		n for n, p in inspect.signature(outbound.deliver).parameters.items()
 		if p.default is inspect.Parameter.empty
 	}
-	missing = {n for n in required if f"{n}=" not in src and n != "log_name"}
+	missing = {n for n in required if f"{n}=" not in src}
 	ok("every required deliver() argument is supplied at the enqueue call sites",
 	   not missing, sorted(missing))

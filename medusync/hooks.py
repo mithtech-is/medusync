@@ -64,6 +64,15 @@ doc_events = {
 	},
 }
 
+# Both of these are bookkeeping ABOUT a document, not a live reference to
+# it, and Frappe blocks a delete on any dynamic link it does not know to
+# ignore. Without this, the log row recording that a document synced is
+# the very thing that stops it ever being deleted: from the desk with
+# "Cannot delete because ... is linked with Medusync Log ...", and from
+# the store, where an inbound `*.deleted` event raises instead of
+# applying and the two systems drift apart without saying so.
+ignore_links_on_delete = ["Medusync Log", "Medusync Exclusion"]
+
 scheduler_events = {
 	"cron": {
 		# Failed deliveries wait for their backoff (Medusync Log.next_attempt_at);
