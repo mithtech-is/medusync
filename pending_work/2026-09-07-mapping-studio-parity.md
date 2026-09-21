@@ -109,3 +109,39 @@ fields, tedious for Sales Order at 117. And the mapper does not yet order
 suggestions by the dictionary's confidence, because the dictionary does not
 exist yet.
 
+---
+
+## Built — 2026-09-21
+
+Parity on fixed values, closing the gap the other way round: ERPNext has
+offered the real accepted values since 2026-09-07, the Medusa editor showed
+a bare text box.
+
+**Medusa**
+- A fixed value in the editor is chosen the way the wizard chooses one: a
+  Link offers that site's records, a Select its options, anything else free
+  text. A pair can be turned into a fixed value and back with `=` / `↩`, so
+  a constant can be added to a mapping that already exists. A saved value
+  the site no longer has stays selected and says so.
+- The wizard and the editor now share one control and one options reader,
+  rather than the two near-copies that let them drift.
+
+**Both sides, and the reason this needed doing**
+
+A row switched to "fixed value" and left blank named a Frappe field, so it
+counted as covering it. On the Medusa side that silenced the mandatory-field
+banner, satisfied `unmetRequired`, passed the rehearsal that gates switching
+a mapping on, and then wrote an empty string over whatever ERPNext held on
+the first real record. It is now flagged in the editor, dropped on save,
+left out of the payload, and reported in the skipped fields.
+
+ERPNext never had the bug — `coveredHere` has always required a trimmed
+value, the mapper refuses to save a row with neither a store field nor a
+fixed value, and `mapping_sync` only puts a truthy constant on the wire. The
+sentinel it uses for "constant mode, nothing chosen yet" is a single space,
+which never survives the save. That difference is worth knowing before
+touching either: the two sides express the same rule in different shapes.
+
+**Not done:** the dropdown-search and dictionary-ordering gaps above are
+unchanged.
+

@@ -84,6 +84,28 @@ the app never starts moving data on its own.
 Per-field direction is how you say "Frappe owns the address, Medusa
 owns the email" without splitting the mapping in two.
 
+### Fixed values
+
+A field-map row can send a constant instead of reading a Medusa path — for
+a field this side requires that the store has no equivalent for. Use `=` on
+the row in the field mapper to switch it over, `↩` to switch it back.
+
+The value is chosen from this site rather than typed: a Link offers this
+site's records, a Select its options, anything else free text
+(`portal.field_options`). A value the site no longer has stays selected and
+says so rather than vanishing from a mapping that has been running on it.
+
+A row in fixed-value mode with nothing filled in is not a source. It does
+not count towards required coverage, and the mapper refuses to save it —
+"Some rows have no source". The in-progress marker is a single space in
+`constant_value`, which is trimmed away on save and never persists, so only
+a real value is ever stored or put on the wire.
+
+The Medusa plugin expresses the same rule differently: it carries `constant`
+as a key whose presence means "fixed value", so *its* in-progress marker is
+an empty string rather than a space. Worth knowing before changing either —
+see `pending_work/2026-09-07-mapping-studio-parity.md`.
+
 ## Endpoints
 
 | Path | Auth | Purpose |

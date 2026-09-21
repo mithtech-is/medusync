@@ -73,6 +73,8 @@ is picked; "Auto-map fields" does that on request.
 | Guided wizard fixed (it could never finish) | plugin `page.tsx` |
 | Pull filter as rows, not JSON | plugin `page.tsx` |
 | Delete propagates instead of disabling | `mapping_sync.apply_deleted` |
+| Fixed values in the Medusa editor, not only the wizard (2026-09-21) | plugin `page.tsx`, `useConstantOptions` |
+| A blank fixed value is not a source (2026-09-21) | `constantHasValue` in `mapping-engine.ts` |
 
 Counts: 126 curated Medusa paths → **417 discovered**. 177 vitest, 322 bench
 tests, all green.
