@@ -1,3 +1,10 @@
+>**Retired (2026-09-27).** This Frappe app has been replaced by the Medusa plugin
+> **`@mithtech-medusa/plugin-erpnext`** (repo
+> [mithtech-is/medusa-erpnextsync](https://github.com/mithtech-is/medusa-erpnextsync)), which
+> does ERPNext↔Medusa sync over Frappe core Webhooks and plain REST with nothing installed on
+> ERPNext. This repository is archived and read-only; do not deploy it to new sites. To remove it
+> from a site: `bench --site <site> uninstall-app medusync --yes && bench --site <site> migrate`.
+
 # Medusync
 
 Two-way sync between a Frappe/ERPNext site and a [Medusa v2](https://medusajs.com) backend.
