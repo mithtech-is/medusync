@@ -43,13 +43,14 @@
 
   "mapping_constants": {
     "Sales Order": {
-      "company_address_name": "99005-Billing",
+      "company_address": "99005-BILLING",
       "order_type": "Sales"
     },
     "Customer": {
       "customer_type": "Individual",
-      "customer_group": "Commercial",
-      "territory": "India"
+      "customer_group": "Individual",
+      "default_currency": "INR",
+      "source": "medusa"
     }
   }
 }

@@ -83,9 +83,16 @@ already in the store are updated, not duplicated.
 
 When the store confirms it has the product, this app follows up with that
 item's price in force today (for each price list the store draws on) and its
-sellable stock (for each warehouse linked on the store). That is why the
-warehouse and price-list rows in §2 matter: with none, a product arrives with
-no price and no stock and the storefront will not sell it.
+sellable stock (for each warehouse linked on the store). A product with no
+price and no stock is not sellable, so those two rows earn their place:
+
+* **Warehouses** — each row pairs an ERPNext warehouse with the Medusa **stock
+  location id** it feeds. There is no default for that id, so with no row the
+  store is never told the stock.
+* **Price lists** — optional. A store with no row falls back to
+  `Medusync Settings -> Selling Price List for Medusa`, and with that blank, to
+  **Standard Selling**. Name the list explicitly when the store sells off a
+  different one.
 
 ## 4. Rehearse, then switch on — in that order
 
@@ -111,7 +118,7 @@ config file):
 
 | Document | Field | Why |
 |---|---|---|
-| Sales Order | `company_address_name` | the company address the sale is made from. On an Indian site this is where the **company GSTIN** and the place of supply are read from, so leaving it blank lets ERPNext pick whichever address it finds first — often the wrong one. Pin the branch that actually sells. |
+| Sales Order | `company_address` (the form labels it "Company Address Name") | the company address the sale is made from. On an Indian site this is where the **company GSTIN** and the place of supply are read from, so leaving it blank lets ERPNext pick whichever address it finds first — often the wrong one. Pin the branch that actually sells. |
 | Sales Order | `order_type` | mandatory; the store has no equivalent |
 | Sales Order | site-specific mandatory fields | e.g. a Sales Type / Sub Type a site has made mandatory |
 | Customer | `customer_type`, `customer_group`, `territory` | a first-time shopper's Customer is created by the order itself; without these it is created wrong (a person filed as a company, say) |
