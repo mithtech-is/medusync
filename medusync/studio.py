@@ -31,7 +31,7 @@ import json
 import frappe
 from frappe.utils import now_datetime
 
-from medusync import api, catalogue, config, outbound, selection, sites
+from medusync import api, catalogue, config, links, outbound, selection, sites
 
 MAPPING_DOCTYPE = config.MAPPING_DOCTYPE
 
@@ -324,6 +324,41 @@ def _in_memory(doctype: str, data: dict):
 # ── What would an inbound payload do ─────────────────────────────────
 
 
+def _rehearsal_site(mapping) -> str | None:
+	"""The store a rehearsed arrival pretends to come from: the mapping's
+	own store, else the only enabled one. None when that is ambiguous."""
+	if mapping.get("site"):
+		return mapping.site
+	enabled = frappe.get_all(sites.SITE_DOCTYPE, filters={"enabled": 1}, pluck="name")
+	return enabled[0] if len(enabled) == 1 else None
+
+
+def _with_insert_defaults(doctype: str, payload: dict, site_id: str | None) -> dict:
+	"""The payload a real insert would save: what arrived, plus what the
+	commerce pack fills on a new record (the store's default account
+	manager among it). The rehearsal must see those, or it reports a field
+	as missing that the real sync would have filled."""
+	try:
+		from medusync.handlers.commerce import mapped as commerce
+	except Exception:
+		return dict(payload)
+	doc = frappe.new_doc(doctype)
+	doc.update(payload)
+	before = {f.fieldname: doc.get(f.fieldname) for f in doc.meta.fields}
+	previous = frappe.flags.get("medusync_site_id")
+	frappe.flags.medusync_site_id = site_id
+	try:
+		commerce._apply_defaults(doc, doctype)
+	finally:
+		frappe.flags.medusync_site_id = previous
+	out = dict(payload)
+	for f in doc.meta.fields:
+		value = doc.get(f.fieldname)
+		if value != before.get(f.fieldname):
+			out[f.fieldname] = value
+	return out
+
+
 def dry_run_inbound(mapping_name: str, sample: dict | None = None) -> dict:
 	"""What would happen if this arrived. Nothing is written."""
 	mapping = frappe.get_doc(MAPPING_DOCTYPE, mapping_name)
@@ -340,19 +375,29 @@ def dry_run_inbound(mapping_name: str, sample: dict | None = None) -> dict:
 	changes = {}
 	errors = []
 	if plan.action == "updated" and plan.existing:
+		# `medusa_customer_id` and the other link keys are not columns: they
+		# live in Medusync Link on purpose. Asking the database for one is an
+		# "Unknown column" error, so query only the real fields and read the
+		# link keys the way a mapping names them -- the same split the real
+		# apply makes with links.take_link_keys before it writes.
+		columns = [field for field in plan.payload if not links.is_link_key(field)]
 		before = (
-			frappe.db.get_value(
-				mapping.document_type, plan.existing, list(plan.payload) or ["name"], as_dict=True
-			)
+			frappe.db.get_value(mapping.document_type, plan.existing, columns or ["name"], as_dict=True)
 			or {}
 		)
+		linked = [field for field in plan.payload if links.is_link_key(field)]
+		if linked:
+			existing_doc = frappe.get_doc(mapping.document_type, plan.existing)
+			for field in linked:
+				before[field] = links.value_for(existing_doc, field)
 		for field, after in plan.payload.items():
 			if before.get(field) != after:
 				changes[field] = {"before": before.get(field), "after": after}
 		errors = _validate_only(mapping.document_type, plan.payload, existing=plan.existing)
 	elif plan.action == "created":
-		changes = {field: {"before": None, "after": after} for field, after in plan.payload.items()}
-		errors = _validate_only(mapping.document_type, plan.payload, key=(plan.key_field, plan.key_value))
+		payload = _with_insert_defaults(mapping.document_type, plan.payload, _rehearsal_site(mapping))
+		changes = {field: {"before": None, "after": after} for field, after in payload.items()}
+		errors = _validate_only(mapping.document_type, payload, key=(plan.key_field, plan.key_value))
 
 	return {
 		"ok": True,
@@ -399,12 +444,21 @@ def _validate_only(doctype: str, payload: dict, existing: str | None = None, key
 	frappe.flags.medusync_inbound = True
 	frappe.db.savepoint(_SAVEPOINT)
 	try:
-		doc = (
-			frappe.get_doc(doctype, existing)
-			if existing
-			else frappe.new_doc(doctype)
-		)
-		doc.update(payload)
+		# A pack that builds this doctype from more than the field map (a
+		# sales document's customer and lines) stands the document up the
+		# way a real arrival would, so what ERPNext refuses here is what it
+		# would refuse then.
+		from medusync import handlers
+
+		builder = handlers.rehearsal_builder(doctype)
+		doc = builder(doctype, payload, existing) if builder else None
+		if doc is None:
+			doc = (
+				frappe.get_doc(doctype, existing)
+				if existing
+				else frappe.new_doc(doctype)
+			)
+			doc.update(payload)
 		if key and key[0] and key[0] != "name" and key[1]:
 			doc.set(key[0], key[1])
 		doc.flags.ignore_permissions = True
@@ -413,6 +467,12 @@ def _validate_only(doctype: str, payload: dict, existing: str | None = None, key
 		# an AttributeError that says nothing about the payload.
 		doc._action = "save"
 		doc.run_method("validate")
+		# Child rows are given their parent during insert, which a rehearsal
+		# never reaches: without one the mandatory check reports "parent"
+		# missing on rows the doctype's own validation has just added (a
+		# payment schedule, say), which is true of no real save.
+		doc.name = doc.name or "rehearsal"
+		doc.set_parent_in_children()
 		doc._validate_mandatory()
 		doc._validate_selects()
 		doc._validate_links()

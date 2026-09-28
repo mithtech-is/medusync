@@ -336,6 +336,29 @@ def choose_none(doctype: str, filters=None) -> dict:
 
 
 @frappe.whitelist()
+def chosen_for_pull(doctype: str, site_id: str | None = None):
+	"""What a store's own pull may bring in.
+
+	The store also fetches on its own every few minutes, straight from the
+	document list, and that road never passed the checks the pushes make:
+	under "Only chosen documents" it would bring the whole table in. It
+	asks this first. None means the doctype is not restricted to chosen
+	documents, so anything may come, as before; a list means only those.
+	A row with no site covers every store, and one naming this store
+	covers it alone -- the same rule the pushes apply.
+	"""
+	frappe.only_for("System Manager")
+	if mode_of(doctype) != MODE_ONLY_CHOSEN:
+		return None
+	rows = frappe.get_all(
+		INCLUSION_DOCTYPE,
+		filters={"document_type": doctype},
+		fields=["document_name", "site"],
+	)
+	return sorted({r["document_name"] for r in rows if not r["site"] or r["site"] == site_id})
+
+
+@frappe.whitelist()
 def chosen_count(doctype: str) -> dict:
 	"""How many are chosen, against how many there are."""
 	frappe.only_for("System Manager")

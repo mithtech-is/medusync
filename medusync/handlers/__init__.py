@@ -12,6 +12,12 @@ packs* (`medusync.handlers.<pack>`), each exposing any of:
                       `medusync.api.receive` uses for a mapped push
     OUTBOUND_HOOKS    {doctype: {docevent: dotted path or [paths]}} — the
                       document events this pack wants to act on
+    DELIVERED_HOOKS   {doctype: dotted path or [paths]} — called once a
+                      store has confirmed a delivery about a document
+                      of that doctype
+    REHEARSAL_BUILDERS {doctype: dotted path} — builds the document a
+                      rehearsal should validate, for a doctype this pack
+                      assembles from more than the field map
 
 Which packs a site loads is that site's decision, in `site_config.json`:
 
@@ -47,6 +53,12 @@ DEFAULT_PACKS = ("commerce",)
 _loaded_for: dict[str, tuple] = {}
 _outbound_for: dict[str, tuple] = {}
 _OUTBOUND: dict[str, dict[str, list]] = {}
+# site -> (packs, {doctype: [callable, ...]}). Kept per site, so one
+# process serving sites with different packs never answers one site
+# from another's list.
+_DELIVERED: dict[str, tuple] = {}
+# site -> (packs, {doctype: callable}). Same shape, same reason.
+_REHEARSAL: dict[str, tuple] = {}
 
 
 def configured_packs() -> list[str]:
@@ -223,9 +235,94 @@ def run_outbound_hooks(doc, method: str | None) -> None:
 					pass
 
 
+# ── After a store confirms a delivery ────────────────────────────────
+
+
+def delivered_hook_map() -> dict[str, list]:
+	"""{doctype: [callable, ...]} for the configured packs."""
+	site = _site_key()
+	packs = tuple(configured_packs())
+	cached = _DELIVERED.get(site)
+	if cached and cached[0] == packs:
+		return cached[1]
+	built: dict[str, list] = {}
+	for name in packs:
+		try:
+			declared = getattr(_pack_module(name), "DELIVERED_HOOKS", None) or {}
+		except Exception:
+			_log_pack_failure(name)
+			continue
+		for doctype, paths in declared.items():
+			if isinstance(paths, str):
+				paths = [paths]
+			for path in paths:
+				try:
+					fn = _resolve(path)
+				except Exception:
+					_log_pack_failure(name)
+					continue
+				built.setdefault(doctype, []).append(fn)
+	_DELIVERED[site] = (packs, built)
+	return built
+
+
+def run_delivered_hooks(doctype: str, docname: str, *, site_id: str, event_name: str, response: dict) -> None:
+	"""Tell the configured packs a store has confirmed a delivery.
+
+	Called by the delivery job once the log row says Success. Must never
+	raise: the delivery has already succeeded, and a pack failing
+	afterwards must not turn it into a retry of something that landed.
+	"""
+	if not doctype or not docname:
+		return
+	for fn in list(delivered_hook_map().get(doctype, ())):
+		try:
+			fn(doctype, docname, site_id=site_id, event_name=event_name, response=response)
+		except Exception:
+			try:
+				frappe.log_error(
+					title=f"Medusync delivered hook failed on {doctype}",
+					message=frappe.get_traceback(),
+				)
+			except Exception:
+				pass
+
+
+def rehearsal_builder(doctype: str):
+	"""How a rehearsal should stand up a document of this doctype, or None.
+
+	A pack that assembles a document from more than the field map — a sales
+	document's customer and lines are built from what the store sends, not
+	from field pairs — says so here. Without it a rehearsal would validate
+	an order with no customer and no lines and report that, which is true
+	of nothing that ever arrives and hides the site's real problems.
+	"""
+	site = _site_key()
+	packs = tuple(configured_packs())
+	cached = _REHEARSAL.get(site)
+	if not cached or cached[0] != packs:
+		built: dict = {}
+		for name in packs:
+			try:
+				declared = getattr(_pack_module(name), "REHEARSAL_BUILDERS", None) or {}
+			except Exception:
+				_log_pack_failure(name)
+				continue
+			for dt, path in declared.items():
+				try:
+					built[dt] = _resolve(path)
+				except Exception:
+					_log_pack_failure(name)
+		_REHEARSAL[site] = (packs, built)
+		cached = _REHEARSAL[site]
+	return cached[1].get(doctype)
+
+
 def clear() -> None:
 	"""Test-only — drop every registered handler and forget what was loaded."""
 	HANDLERS.clear()
 	_loaded_for.clear()
 	_OUTBOUND.clear()
 	_outbound_for.clear()
+	_DELIVERED.clear()
+	_REHEARSAL.clear()

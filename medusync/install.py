@@ -49,6 +49,18 @@ def after_migrate():
 	except Exception:
 		frappe.log_error(title="medusync could not place the sync tick", message=frappe.get_traceback())
 
+	# Before the defaults land: a shipped fixed value names an option in
+	# another list, and the mapping is only usable once that option exists.
+	try:
+		added = defaults.ensure_fixed_value_options()
+		if added:
+			print(
+				"medusync: added %s option(s) the shipped mappings point at: %s"
+				% (len(added), ", ".join("%s %r" % (a["doctype"], a["name"]) for a in added))
+			)
+	except Exception:
+		frappe.log_error(title="medusync could not add fixed-value options", message=frappe.get_traceback())
+
 	try:
 		if defaults.installed_version() < defaults.DEFAULTS_VERSION:
 			result = defaults.apply_defaults(reason="migrate")

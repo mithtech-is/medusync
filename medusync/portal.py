@@ -19,6 +19,7 @@ import frappe
 from medusync import sites
 
 MAPPING_DOCTYPE = "Medusync Mapping"
+_FILLED_SAVEPOINT = "medusync_filled_probe"
 
 
 @frappe.whitelist()
@@ -161,3 +162,43 @@ def field_options(doctype: str, fieldname: str) -> dict:
 		"options": names[:LIMIT],
 		"truncated": len(names) > LIMIT,
 	}
+
+
+@frappe.whitelist()
+def fields_filled_on_arrival(doctype: str) -> list:
+	"""Required fields this site fills itself when a record arrives.
+
+	A store cannot know that a Sales Order's customer and lines are built
+	from the order it sends, nor that ERPNext fills the currency and the
+	price list from the customer. Asking an operator to map those is asking
+	for pairs that mean nothing, and refusing to enable the mapping until
+	somebody does is worse: the gate stops being a check and becomes a
+	riddle. So the side that owns the document answers for it.
+
+	Answered by building the document the way a real arrival would -- the
+	handler pack's own builder, the one a rehearsal uses -- and reporting
+	which required fields came out filled. Nothing is written. An empty list
+	means "ask about all of them", which is what a store did before this.
+	"""
+	frappe.only_for("System Manager")
+	from medusync import handlers
+
+	builder = handlers.rehearsal_builder(doctype)
+	if not builder:
+		return []
+	meta = frappe.get_meta(doctype)
+	required = [field.fieldname for field in meta.fields if field.reqd]
+	filled: list = []
+	frappe.db.savepoint(_FILLED_SAVEPOINT)
+	try:
+		doc = builder(doctype, {})
+		if doc:
+			filled = [name for name in required if doc.get(name) not in (None, "", [])]
+	except Exception:
+		frappe.log_error(
+			title="medusync could not answer what it fills", message=frappe.get_traceback()
+		)
+		filled = []
+	finally:
+		frappe.db.rollback(save_point=_FILLED_SAVEPOINT)
+	return filled

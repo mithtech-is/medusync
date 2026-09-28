@@ -474,6 +474,7 @@ def deliver(
 		# "why is this missing over there" is answerable from the log
 		# alone. Older receivers say nothing — fall back to "updated".
 		action = "updated"
+		body_json = {}
 		try:
 			body_json = json.loads(text or "{}")
 			action = (
@@ -495,8 +496,16 @@ def deliver(
 			# A retry may have parked the payload on the row; the row is
 			# terminal now, so honour "don't log bodies".
 			fields["request_body"] = None
-		_finish_log(log_name, **fields)
+		# The store row first, the result second. Every delivery to this
+		# store writes "last seen" on the same row, and on MariaDB 11.6+
+		# (innodb_snapshot_isolation, on by default) a job that finishes
+		# second has that write refused and its whole transaction undone.
+		# In this order only the "last seen" note can be lost that way,
+		# never the result: the row would otherwise stay Queued forever.
 		_mark_site_seen(site["site_id"], is_test=is_test)
+		_finish_log(log_name, **fields)
+		if not is_test and kind == envelope.KIND_EVENT:
+			_after_delivered(log_name, site["site_id"], event_name, body_json)
 		return
 
 	_retry_or_fail(
@@ -510,6 +519,32 @@ def deliver(
 		site_id=site["site_id"],
 		kind=kind,
 	)
+
+
+def _after_delivered(log_name: str, site_id: str, event_name: str, response) -> None:
+	"""Let the configured packs follow up on what a store just confirmed.
+
+	The delivery job is handed the payload, not the document; the log row
+	knows which document this was. Never raises: this delivery has already
+	succeeded, whatever a pack does next.
+	"""
+	try:
+		row = frappe.db.get_value(
+			"Medusync Log", log_name, ["document_type", "document_name"], as_dict=True
+		)
+		if not row or not row.document_type or not row.document_name:
+			return
+		from medusync import handlers
+
+		handlers.run_delivered_hooks(
+			row.document_type,
+			row.document_name,
+			site_id=site_id,
+			event_name=event_name,
+			response=response if isinstance(response, dict) else {},
+		)
+	except Exception:
+		frappe.log_error(title="Medusync follow-up after delivery failed", message=frappe.get_traceback())
 
 
 def retry_delay_seconds(attempt: int) -> int:
@@ -540,9 +575,10 @@ def _retry_or_fail(
 		fields = dict(status="Poison", status_code=status_code, error=error, attempt=attempt, next_attempt_at=None)
 		if not cfg.log_payloads:
 			fields["request_body"] = None
-		_finish_log(log_name, **fields)
+		# Store row first, result second: see the success path in deliver().
 		_mark_site_error(site_id, error)
 		breaker.record_failure(site_id)
+		_finish_log(log_name, **fields)
 		return
 
 	# Park the row; `medusync.tasks.retry_due` re-enqueues it once

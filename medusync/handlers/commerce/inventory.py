@@ -7,11 +7,14 @@
 # One warehouse can feed several stores under different ids, and each store is
 # told its own; a warehouse nobody mapped is skipped before any work is done.
 #
-# Two triggers:
+# Three triggers:
 #   - Stock Ledger Entry.after_insert  -> actual_qty changed (receipts/issues)
 #   - Sales Order submit/cancel/update -> reserved_qty changed (no SLE fires)
-# Both defer to an after-commit job `push_level` that reads the settled Bin
-# (at after_insert neither Bin nor qty_after_transaction is final).
+#   - a store confirming it holds the product -> the level as it stands
+#     (push_current, from followup.py)
+# The first two defer to an after-commit job `push_level` that reads the
+# settled Bin (at after_insert neither Bin nor qty_after_transaction is final);
+# the third runs inside a delivery job, after that commit has long happened.
 import frappe
 
 from medusync import config, warehouses
@@ -91,9 +94,10 @@ def sellable(item_code, warehouse) -> float:
     return max(0.0, actual - reserved - safety)
 
 
-def push_level(item_code, warehouse, ref):
+def push_level(item_code, warehouse, ref, only_site=None):
     """After-commit: read the settled Bin, then tell each store that draws
-    on this warehouse — each under the stock-location id it knows."""
+    on this warehouse — each under the stock-location id it knows.
+    `only_site` narrows that to one store."""
     targets = warehouses.targets_for(warehouse)
     if not targets:
         return
@@ -103,6 +107,8 @@ def push_level(item_code, warehouse, ref):
 
     def for_store(site_id, body):
         if site_id not in locations:
+            return None
+        if only_site and site_id != only_site:
             return None
         # A store on the legacy single-warehouse setting never named a
         # location; the plugin then picks its own, as it always did.
@@ -119,3 +125,23 @@ def push_level(item_code, warehouse, ref):
         docname=item_code,
         per_site=for_store,
     )
+
+
+def push_current(item_code, site_id, ref):
+    """Tell one store this item's sellable stock at every warehouse it draws on.
+
+    Stock is sent when it moves. An item untouched since before it was
+    chosen would otherwise reach the store showing none.
+    """
+    try:
+        if not _guard():
+            return
+        if not frappe.db.get_value("Item", item_code, "is_stock_item"):
+            # Nothing is counted for a service; telling the store "0" would
+            # only make it unsellable.
+            return
+        for warehouse in sorted(warehouses.watched()):
+            if any(store == site_id for store, _ in warehouses.targets_for(warehouse)):
+                push_level(item_code, warehouse, ref, only_site=site_id)
+    except Exception:
+        frappe.log_error(title="medusync inventory push_current failed", message=frappe.get_traceback())

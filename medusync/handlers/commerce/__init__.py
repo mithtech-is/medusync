@@ -85,6 +85,23 @@ OUTBOUND_HOOKS = {
 	},
 }
 
+# Once a store confirms it holds an item as a product, it is sent that
+# item's current price and stock. Both travel as their own messages and
+# otherwise only when they change, so a product reaching a store for the
+# first time would sit there unpriced and out of stock until somebody
+# edited its price or stock moved.
+DELIVERED_HOOKS = {
+	"Item": "medusync.handlers.commerce.followup.after_product_delivered",
+}
+
+# A sales document is more than its field map: the customer and the lines
+# are built from what the store sends. A rehearsal validating the mapped
+# fields alone would report an order with no customer and no lines.
+REHEARSAL_BUILDERS = {
+	"Sales Order": "medusync.handlers.commerce.mapped.rehearsal_doc",
+	"Sales Invoice": "medusync.handlers.commerce.mapped.rehearsal_doc",
+}
+
 
 def register() -> None:
 	"""Register this pack's inbound handlers. Idempotent — safe to re-run.

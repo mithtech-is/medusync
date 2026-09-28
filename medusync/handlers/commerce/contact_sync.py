@@ -13,9 +13,17 @@ Never raises: a bad phone must not fail the customer sync.
 import frappe
 
 
+_SAVEPOINT = "medusync_contact_sync"
+
+
 def sync_customer_contact(customer_name, phone, first_name=None, last_name=None):
     if not phone:
         return {"skipped": "no phone"}
+    # Scoped to a savepoint: this helper is called in the middle of somebody
+    # else's work -- a customer sync, or an order being written around it --
+    # and a phone ERPNext refuses (it insists they are unique across contacts)
+    # must undo this contact and nothing else.
+    frappe.db.savepoint(_SAVEPOINT)
     try:
         existing = frappe.db.get_value(
             "Dynamic Link",
@@ -42,8 +50,7 @@ def sync_customer_contact(customer_name, phone, first_name=None, last_name=None)
             "customer_primary_contact": doc.name,
             "mobile_no": str(phone),
         })
-        frappe.db.commit()
         return {"contact": doc.name, "phone": str(phone)}
     except Exception as exc:
-        frappe.db.rollback()
+        frappe.db.rollback(save_point=_SAVEPOINT)
         return {"error": str(exc)[:150]}

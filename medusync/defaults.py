@@ -54,6 +54,17 @@ UID_PREFIX = "default:"
 DEFAULT_CATALOGUE_DOCTYPE = "Item"
 
 
+def _field(entry) -> tuple:
+	"""Read one shipped field: (erpnext_field, medusa_path, direction),
+	optionally followed by a fixed value written on every sync from Medusa.
+
+	The fourth part is optional so every existing three-part field keeps
+	meaning exactly what it did.
+	"""
+	erpnext_field, medusa_path, direction, *rest = entry
+	return erpnext_field, medusa_path, direction, (rest[0] if rest else None)
+
+
 def _catalogue_doctype() -> str:
 	"""What this site calls its products.
 
@@ -187,7 +198,7 @@ def _missing_fields(spec: dict) -> list[str]:
 
 	meta = frappe.get_meta(spec["document_type"])
 	standard = {"name", "owner", "creation", "modified", "docstatus"}
-	named = [f for f, _path, _direction in spec["fields"]]
+	named = [_field(entry)[0] for entry in spec["fields"]]
 	if spec.get("key_field") and spec["key_field"] not in named:
 		named.append(spec["key_field"])
 	# A link key lives in Medusync Link, not on the doctype, so it is never missing.
@@ -214,13 +225,14 @@ def _write_spec(doc, spec: dict) -> list[str]:
 		}
 	)
 	doc.set("field_map", [])
-	for erpnext_field, medusa_path, direction in spec["fields"]:
+	for entry in spec["fields"]:
+		erpnext_field, medusa_path, direction, constant = _field(entry)
 		if erpnext_field in missing:
 			continue
-		doc.append(
-			"field_map",
-			{"frappe_field": erpnext_field, "medusa_path": medusa_path, "direction": direction},
-		)
+		row = {"frappe_field": erpnext_field, "medusa_path": medusa_path, "direction": direction}
+		if constant not in (None, ""):
+			row["constant_value"] = constant
+		doc.append("field_map", row)
 	# A default that has just been written has not been rehearsed as it now
 	# stands, and the enable gate reads the signature rather than the flag,
 	# so clearing it is what makes the gate tell the truth afterwards.
@@ -317,6 +329,59 @@ def restore_defaults(reason: str = "restore") -> dict:
 	frappe.db.set_single_value("Medusync Settings", "defaults_version", DEFAULTS_VERSION)
 	frappe.clear_cache(doctype="Medusync Settings")
 	return {"version": DEFAULTS_VERSION, "reason": reason, "mappings": restored, "skipped": skipped}
+
+
+#: Lists a shipped fixed value may add an option to when this site lacks
+#: it. Each is a plain named list with nothing attached: not a tree, no
+#: accounts, no person. A User is never created, whatever a mapping says.
+SUPPLIABLE_LISTS = ("Lead Source", "Industry Type", "Market Segment")
+
+
+def ensure_fixed_value_options() -> list[dict]:
+	"""Give the shipped fixed values something to point at.
+
+	A fixed value on a Link field names an option in another list, and it
+	only works where that option exists. These are this app's own values,
+	so this app supplies them: for each one that lands on a plain list,
+	add the option when it is missing. It never changes or removes an
+	option that is already there.
+
+	Only the shipped defaults count. A value typed into a mapping by hand
+	is left to the rehearsal, so a typo is reported instead of quietly
+	becoming an option. Never raises: a missing option is reported by the
+	rehearsal anyway, and is not worth failing a migrate over.
+	"""
+	created = []
+	for spec in default_mappings():
+		try:
+			meta = frappe.get_meta(spec["document_type"])
+		except Exception:
+			continue
+		for entry in spec["fields"]:
+			fieldname, _path, _direction, constant = _field(entry)
+			if constant in (None, ""):
+				continue
+			field = meta.get_field(fieldname)
+			if not field or field.fieldtype != "Link" or field.options not in SUPPLIABLE_LISTS:
+				continue
+			target = field.options
+			if frappe.db.exists(target, constant):
+				continue
+			target_meta = frappe.get_meta(target)
+			autoname = target_meta.autoname or ""
+			if target_meta.is_tree or not autoname.startswith("field:"):
+				continue
+			try:
+				frappe.get_doc({"doctype": target, autoname.split(":", 1)[1]: constant}).insert(
+					ignore_permissions=True
+				)
+				created.append({"doctype": target, "name": constant})
+			except Exception:
+				frappe.log_error(
+					title="medusync could not add a fixed-value option",
+					message=frappe.get_traceback(),
+				)
+	return created
 
 
 def apply_defaults(force: bool = False, reason: str = "upgrade") -> dict:

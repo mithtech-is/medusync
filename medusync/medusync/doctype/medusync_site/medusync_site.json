@@ -21,6 +21,7 @@
   "outbound_secret",
   "behaviour_section",
   "handler_pack",
+  "default_account_manager",
   "column_break_behaviour",
   "orders_section",
   "order_document",
@@ -146,6 +147,13 @@
    "fieldname": "handler_pack",
    "fieldtype": "Data",
    "label": "Handler Pack"
+  },
+  {
+   "description": "Customers who arrive from this store without an account manager are given this user. It is only used when that user exists here, and it never overrides one that arrived. Leave empty if your Customer form does not ask for one.",
+   "fieldname": "default_account_manager",
+   "fieldtype": "Link",
+   "label": "Default Account Manager",
+   "options": "User"
   },
   {
    "fieldname": "column_break_behaviour",
@@ -301,7 +309,7 @@
   }
  ],
  "links": [],
- "modified": "2026-09-13 00:00:00.000000",
+ "modified": "2026-09-22 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Medusync",
  "name": "Medusync Site",
