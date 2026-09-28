@@ -1,0 +1,55 @@
+{
+  "notes": [
+    "Copy this file, edit it, keep your copy OUT of git: it names one deployment.",
+    "Secrets are NOT read from here. Export them instead:",
+    "  export MEDUSYNC_INBOUND_SECRET=...   # Medusa -> here",
+    "  export MEDUSYNC_OUTBOUND_SECRET=...  # here -> Medusa",
+    "Then:  bench --site <site> execute medusync.setup_store.run --kwargs \"{'config': '/path/to/store.json'}\"",
+    "Add 'dry_run': True to the kwargs to see the plan without writing."
+  ],
+
+  "settings": {
+    "enabled": 1,
+    "medusa_url": "http://medusa.example.com:9000",
+    "verify_ssl": 1,
+    "request_timeout": 15,
+    "products_doctype": "Item"
+  },
+
+  "selection": [
+    { "document_type": "Item", "mode": "Only chosen documents" }
+  ],
+
+  "store": {
+    "site_id": "main",
+    "title": "Web store",
+    "medusa_url": "http://medusa.example.com:9000",
+    "enabled": 1,
+    "handler_pack": "commerce",
+    "default_account_manager": "sales@example.com",
+
+    "order_document": "Sales Order",
+    "submit_documents": 1,
+    "record_payments": 0,
+    "mode_of_payment": "Cash",
+
+    "warehouses": [
+      { "warehouse": "Stores - ABC", "location_id": "sloc_REPLACE_ME" }
+    ],
+    "price_lists": [
+      { "price_list": "Standard Selling", "direction": "To Medusa" }
+    ]
+  },
+
+  "mapping_constants": {
+    "Sales Order": {
+      "company_address_name": "99005-Billing",
+      "order_type": "Sales"
+    },
+    "Customer": {
+      "customer_type": "Individual",
+      "customer_group": "Commercial",
+      "territory": "India"
+    }
+  }
+}
