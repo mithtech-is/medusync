@@ -171,12 +171,12 @@ def _write(doc, values: dict, allowed: tuple, where: str, report: dict, dry_run:
 	return touched
 
 
-def _secrets(doc, where: str, report: dict, dry_run: bool) -> bool:
+def _secrets(doc, where: str, report: dict, dry_run: bool, nag: bool = True) -> bool:
 	touched = False
 	for field, env in SECRET_ENV.items():
 		wanted = os.environ.get(env)
 		if not wanted:
-			if not doc.get_password(field, raise_exception=False):
+			if nag and not doc.get_password(field, raise_exception=False):
 				report["todo"].append(f"{where}: {field} is empty — export {env} and re-run, or type it in Desk")
 			continue
 		if doc.get_password(field, raise_exception=False) == wanted:
@@ -204,11 +204,23 @@ def _show(value) -> str:
 def _settings(cfg: dict, report: dict, dry_run: bool) -> None:
 	doc = frappe.get_doc(config.SETTINGS_DOCTYPE)
 	touched = _write(doc, cfg.get("settings"), SETTINGS_FIELDS, "Settings", report, dry_run)
-	touched = _secrets(doc, "Settings", report, dry_run) or touched
+	# A store row carries its own secrets and uses them in preference to
+	# these; on a site set up per store, the Settings pair is meant to be
+	# empty and saying so every run is noise.
+	touched = _secrets(doc, "Settings", report, dry_run, nag=not _stores_carry_secrets()) or touched
 	if touched and not dry_run:
 		doc.flags.ignore_permissions = True
 		doc.save(ignore_permissions=True)
 		frappe.clear_cache(doctype=config.SETTINGS_DOCTYPE)
+
+
+def _stores_carry_secrets() -> bool:
+	"""Does some store already hold both halves of its own pair?"""
+	for name in frappe.get_all(SITE_DOCTYPE, filters={"enabled": 1}, pluck="name"):
+		site = frappe.get_doc(SITE_DOCTYPE, name)
+		if all(site.get_password(field, raise_exception=False) for field in SECRET_ENV):
+			return True
+	return False
 
 
 def _selection(cfg: dict, report: dict, dry_run: bool) -> None:
